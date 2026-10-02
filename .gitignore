@@ -1,0 +1,35 @@
+# Entornos virtuales de Python
+venv/
+env/
+ENV/
+.venv/
+
+# Byte-compiled / Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Archivos de volcado SQL y temporales
+*.sql
+bases_datos/*.sql
+bases_datos/*.csv
+
+# Archivos de base de datos origen (Contenido sensible o pesado)
+bases_datos/*.mdb
+bases_datos/*.accdb
+!bases_datos/.gitkeep
+
+# Archivos de registro / Logs
+*.log
+errores_estructura.log
+errores_carga_datos.log
+
+# Configuración de entornos de IDEs y Editores
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sistema Operativo
+.DS_Store
+Thumbs.db
