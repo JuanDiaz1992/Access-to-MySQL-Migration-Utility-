@@ -172,6 +172,45 @@ def crear_bd_si_no_existe(db_name):
     except Exception as e:
         console.print(f"[bold red]Error al verificar/crear la BD:[/bold red] {e}")
 
+def leer_tipos_access(schema_access):
+    """{(tabla, columna): tipo_access_en_minusculas} a partir de `mdb-schema <mdb> access`."""
+    tipos = {}
+    tabla = None
+    for linea in schema_access.splitlines():
+        m = re.match(r'CREATE TABLE \[([^\]]+)\]', linea)
+        if m:
+            tabla = m.group(1)
+            continue
+        m = re.match(r'\s*\[([^\]]+)\]\s+(\w+)', linea)
+        if m and tabla:
+            tipos[(tabla, m.group(1))] = m.group(2).lower()
+    return tipos
+
+def corregir_tipos(schema_mysql, schema_access):
+    """mdb-schema convierte Double y Currency de Access en FLOAT de MySQL (4 bytes, ~7 dígitos): pierde
+    decimales en valores grandes. Se corrigen: Double -> DOUBLE, Currency -> DECIMAL(19,4).
+    Los memos salen como TEXT (64 KB máx.): se pasan a LONGTEXT."""
+    tipos_access = leer_tipos_access(schema_access)
+
+    salida = []
+    tabla = None
+    for linea in schema_mysql.splitlines():
+        m = re.match(r'CREATE TABLE `([^`]+)`', linea)
+        if m:
+            tabla = m.group(1)
+        m = re.match(r'(\s*`([^`]+)`\s+)(float|text)\b(.*)$', linea, re.IGNORECASE)
+        if m and tabla:
+            tipo_mysql = m.group(3).lower()
+            tipo_access = tipos_access.get((tabla, m.group(2)), "")
+            if tipo_mysql == "float" and tipo_access == "double":
+                linea = f"{m.group(1)}double{m.group(4)}"
+            elif tipo_mysql == "float" and tipo_access == "currency":
+                linea = f"{m.group(1)}decimal(19,4){m.group(4)}"
+            elif tipo_mysql == "text":
+                linea = f"{m.group(1)}longtext{m.group(4)}"
+        salida.append(linea)
+    return "\n".join(salida)
+
 def extraer_estructura(ruta_mdb, prefijo=""):
     """Genera el SQL únicamente con la estructura DDL."""
     ruta_sql = ruta_mdb.rsplit('.', 1)[0] + '_estructura.sql'
@@ -179,6 +218,8 @@ def extraer_estructura(ruta_mdb, prefijo=""):
 
     try:
         schema = subprocess.check_output(["mdb-schema", ruta_mdb, "mysql"]).decode("utf-8", errors="ignore")
+        schema_access = subprocess.check_output(["mdb-schema", ruta_mdb, "access"]).decode("utf-8", errors="ignore")
+        schema = corregir_tipos(schema, schema_access)
 
         raw_sql = "SET FOREIGN_KEY_CHECKS=0;\nSET UNIQUE_CHECKS=0;\n\n"
         raw_sql += schema + "\n\n"

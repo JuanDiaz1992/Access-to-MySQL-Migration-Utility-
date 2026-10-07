@@ -24,8 +24,9 @@ En producción, donde las tablas ya existen, basta con ejecutar solo la fase de 
 .\migrar.ps1 -Fase verificar  -Mdb C:\BasesActivas\GenBase.mdb -BaseDatos aqua_pruebas -Prefijo genbase_
 ```
 
-`verificar_conteos.py` compara las filas de cada tabla entre Access y MySQL (cuenta las filas realmente
-exportadas, no `mdb-count`, que puede estar desfasado). Devuelve código de salida 1 si hay diferencias.
+`verificar_migracion.py` compara cada tabla entre Access y MySQL **fila por fila y celda por celda** (no solo
+cantidades; los `float` se comparan a su precisión real, los binarios por su contenido hexadecimal). Si hay
+diferencias lista las tablas, cuántas filas faltan o sobran y algunos ejemplos, y termina con código de salida 1.
 Los scripts aceptan `--db`, `--archivo` y `--prefijo`; lo que falte se pregunta de forma interactiva.
 La conexión se configura con variables de entorno / `.env` (`DB_SOCKET` solo para Linux sin Docker).
 
@@ -39,8 +40,19 @@ Notas aprendidas:
   apuntaban a tablas inexistentes y las inserciones normales en esas tablas fallaban.
 - Una columna `unique` ya crea en MySQL un índice con el nombre de la columna: un `ADD INDEX` con ese nombre
   recibe sufijo `_2` en vez de fallar con `ERROR 1061`.
+- Una fila por sentencia `INSERT` (`mdb-export -S 1`) con `autocommit=0` y `COMMIT` por tabla: un valor inválido
+  solo afecta a su propia fila (antes tumbaba un lote de cientos). Las filas que MySQL rechace se guardan,
+  con su mensaje de error, en `rechazados_carga_datos.sql` y el detalle en `errores_carga_datos.log`
+  (`cargar_datos.py` termina con código 1 si hubo rechazos).
+- La carga usa el modo SQL estricto del servidor **sin** `NO_ZERO_IN_DATE`/`NO_ZERO_DATE`: Access permite fechas
+  como `1900-01-00` y MySQL las rechazaba. Se guardan tal cual, sin alterar el dato.
 - Los datos se escriben a disco tabla por tabla (no se acumula todo el SQL en memoria), necesario para `.mdb`
   de cientos de MB; el cliente `mysql` usa `--max-allowed-packet=64M`.
+- Tipos numéricos: `mdb-schema` convierte Access `Double` y `Currency` en `FLOAT` de 4 bytes (~7 dígitos), que
+  pierde decimales en importes grandes. Se crean como `DOUBLE` y `DECIMAL(19,4)`; los memos como `LONGTEXT`
+  (`TEXT` se limita a 64 KB). `verificar_migracion.py` audita estos tipos también en estructuras ya creadas con
+  versiones anteriores de la herramienta: si aparecen columnas `FLOAT` donde Access tenía `Double`, hay que
+  corregirlas (`ALTER TABLE ... MODIFY ... DOUBLE`) antes de cargar datos.
 - Access `Byte` (0-255) se crea como `tinyint unsigned` (mdb-schema lo daba con signo, máx. 127).
 - `migrador.py` (todo en uno) es la versión antigua: quita tildes de todo el SQL, incluidos los datos. Usar las dos fases.
 

@@ -9,6 +9,13 @@ from config import CARPETA_SQL, comando_mysql, entorno_mysql, pedir_parametros
 
 console = Console()
 
+# Modo del servidor + NO_AUTO_VALUE_ON_ZERO, sin NO_ZERO_IN_DATE / NO_ZERO_DATE (conserva el modo estricto)
+SQL_MODE_MIGRACION = (
+    "SET SESSION sql_mode=(SELECT TRIM(BOTH ',' FROM "
+    "REPLACE(REPLACE(REPLACE(REPLACE(CONCAT(@@sql_mode, ',NO_AUTO_VALUE_ON_ZERO'), "
+    "'NO_ZERO_IN_DATE', ''), 'NO_ZERO_DATE', ''), ',,,', ','), ',,', ',')));"
+)
+
 def quitar_tildes(texto):
     """Elimina tildes y caracteres especiales respetando Mayúsculas y Minúsculas."""
     texto_normalizado = unicodedata.normalize('NFD', texto)
@@ -119,21 +126,24 @@ def extraer_datos(ruta_mdb, prefijo=""):
         tables = subprocess.check_output(["mdb-tables", "-1", ruta_mdb]).decode("utf-8", errors="ignore").splitlines()
 
         # Con "mdb-export -e" las barras invertidas van escapadas: NO usar NO_BACKSLASH_ESCAPES.
-        # Se conserva el modo estricto del servidor para que los valores fuera de rango fallen en vez de truncarse.
+        # Se conserva el modo estricto (los valores fuera de rango fallan en vez de truncarse), pero se permiten
+        # fechas con día/mes cero: Access las guarda (p. ej. 1900-01-00) y el modo estricto rechazaría la fila.
         tablas_fallidas = []
         # Cada tabla se sanea y se escribe a disco al terminar: no se acumula todo el SQL en memoria (bases de cientos de MB).
         with open(ruta_sql, "w", encoding="utf-8") as salida:
             salida.write(
                 "SET FOREIGN_KEY_CHECKS=0;\n"
                 "SET UNIQUE_CHECKS=0;\n"
-                "SET SQL_MODE=CONCAT(@@SQL_MODE, ',NO_AUTO_VALUE_ON_ZERO');\n\n"
+                f"{SQL_MODE_MIGRACION}\n"
+                "SET autocommit=0;\n\n"
             )
 
             for table in track_tablas(tables):
+                # -S 1: una fila por sentencia, así un valor inválido solo afecta a su fila y no a todo un lote
                 # -b hex: los campos binarios (OLE/imágenes) salen como 0x... válido en MySQL
                 # -e: escapa \ como \\ y los saltos de línea como \n (si no, MySQL se come las barras invertidas)
                 res = subprocess.run(
-                    ["mdb-export", "-I", "mysql", "-b", "hex", "-e", "-D", "%Y-%m-%d %H:%M:%S", ruta_mdb, table],
+                    ["mdb-export", "-I", "mysql", "-S", "1", "-b", "hex", "-e", "-D", "%Y-%m-%d %H:%M:%S", ruta_mdb, table],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
                 if res.returncode != 0:
@@ -142,7 +152,7 @@ def extraer_datos(ruta_mdb, prefijo=""):
                     console.print(f"[bold red]  ✖ No se pudo exportar la tabla '{table}': {detalle}[/bold red]")
                     continue
                 datos = res.stdout.decode("utf-8", errors="ignore")
-                salida.write(normalizar_inserts(datos, prefijo) + "\n")
+                salida.write(normalizar_inserts(datos, prefijo) + "\nCOMMIT;\n")
 
             salida.write("\nSET FOREIGN_KEY_CHECKS=1;\nSET UNIQUE_CHECKS=1;\n")
 
@@ -154,45 +164,85 @@ def extraer_datos(ruta_mdb, prefijo=""):
         console.print("[bold red]Error:[bold red] 'mdbtools' no está instalado. Ejecuta: sudo apt install mdbtools")
         sys.exit(1)
 
+PATRON_ERROR = re.compile(r"^ERROR (\d+) \(([^)]*)\) at line (\d+): (.*)$")
+MAX_RECHAZADOS = 10000
+
+def resumir_errores(ruta_log):
+    """Lee el log por streaming: total de errores, los primeros 5 y {linea_del_sql: mensaje}."""
+    total, primeros, por_linea = 0, [], {}
+    with open(ruta_log, "r", encoding="utf-8", errors="ignore") as f:
+        for linea in f:
+            linea = linea.strip()
+            if "ERROR" not in linea:
+                continue
+            total += 1
+            if len(primeros) < 5:
+                primeros.append(linea)
+            m = PATRON_ERROR.match(linea)
+            if m and len(por_linea) < MAX_RECHAZADOS:
+                por_linea[int(m.group(3))] = m.group(4)
+    return total, primeros, por_linea
+
+def guardar_rechazados(archivo_sql, por_linea, ruta_destino):
+    """Guarda las sentencias (filas) que MySQL rechazó, para no perderlas sin rastro."""
+    pendientes = set(por_linea)
+    with open(archivo_sql, "r", encoding="utf-8", errors="ignore") as src, \
+         open(ruta_destino, "w", encoding="utf-8") as dst:
+        for n, linea in enumerate(src, 1):
+            if n in pendientes:
+                dst.write(f"-- {por_linea[n]}\n{linea.rstrip()}\n")
+                pendientes.discard(n)
+                if not pendientes:
+                    break
+
 def cargar_datos_native(db_name, archivo_sql):
-    """Inserta los registros en las tablas existentes."""
+    """Inserta los registros en las tablas existentes. Devuelve True si hubo errores."""
     console.print(f"\n[bold blue]Insertando registros en MySQL...[/bold blue]")
 
-    ruta_log = os.path.join(os.path.dirname(__file__), "errores_carga_datos.log")
+    carpeta = os.path.dirname(os.path.abspath(__file__))
+    ruta_log = os.path.join(carpeta, "errores_carga_datos.log")
+    ruta_rechazados = os.path.join(carpeta, "rechazados_carga_datos.sql")
+    hubo_errores = False
 
     comando = comando_mysql(db_name)
 
     try:
-        with open(archivo_sql, "r", encoding="utf-8", errors="ignore") as f:
-            proceso = subprocess.run(
+        # stderr va directo a disco: un error repetido en millones de filas no debe llenar la memoria
+        with open(archivo_sql, "r", encoding="utf-8", errors="ignore") as f, \
+             open(ruta_log, "w", encoding="utf-8") as log_file:
+            subprocess.run(
                 comando,
                 stdin=f,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=log_file,
                 text=True,
                 env=entorno_mysql()
             )
 
-        if proceso.stderr:
-            with open(ruta_log, "w", encoding="utf-8") as log_file:
-                log_file.write(proceso.stderr)
-
-        lineas_error = [linea for linea in proceso.stderr.splitlines() if "ERROR" in linea]
-        if not lineas_error:
+        total, primeros, por_linea = resumir_errores(ruta_log)
+        if total == 0:
+            os.remove(ruta_log)
             console.print("\n[bold green]✔ ¡Carga de datos completada con éxito![/bold green]\n")
         else:
-            console.print("\n[bold yellow]⚠ La carga terminó con algunos errores en registros específicos.[/bold yellow]")
-            console.print(f"Revisa el detalle completo en: [bold cyan]{ruta_log}[/bold cyan]\n")
+            hubo_errores = True
+            guardar_rechazados(archivo_sql, por_linea, ruta_rechazados)
+            console.print(f"\n[bold yellow]⚠ La carga terminó con {total} errores en registros específicos.[/bold yellow]")
+            console.print(f"Detalle de los errores: [bold cyan]{ruta_log}[/bold cyan]")
+            console.print(f"Filas rechazadas (para revisarlas o recargarlas): [bold cyan]{ruta_rechazados}[/bold cyan]")
+            if total > MAX_RECHAZADOS:
+                console.print(f"[bold yellow]Solo se guardaron las primeras {MAX_RECHAZADOS} filas rechazadas.[/bold yellow]")
             console.print("[bold red]Primeros errores encontrados:[/bold red]")
-            for err in lineas_error[:5]:
+            for err in primeros:
                 console.print(f" • {err}")
 
     except Exception as e:
+        hubo_errores = True
         console.print(f"[bold red]Error ejecutando el cliente nativo de MySQL:[/bold red] {e}")
     finally:
         if os.path.exists(archivo_sql):
             os.remove(archivo_sql)
             console.print(f"[bold dim]🗑 Archivo temporal borrado: {os.path.basename(archivo_sql)}[/bold dim]\n")
+    return hubo_errores
 
 def main():
     console.rule("[bold cyan]Cargador de Datos (MySQL)[/bold cyan]")
@@ -214,7 +264,8 @@ def main():
             return
 
     archivo_sql = extraer_datos(archivo, prefijo)
-    cargar_datos_native(db_name, archivo_sql)
+    if cargar_datos_native(db_name, archivo_sql):
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

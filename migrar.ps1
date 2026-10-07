@@ -15,7 +15,7 @@ $repo = $PSScriptRoot
 if (-not (Test-Path $Mdb)) { throw "No existe el archivo: $Mdb" }
 if (-not (Test-Path "$repo\.env")) { throw "Falta .env: copia .env.example a .env y completa DB_PASSWORD" }
 
-$script = switch ($Fase) { 'estructura' { 'crear_estructura.py' } 'datos' { 'cargar_datos.py' } 'verificar' { 'verificar_conteos.py' } }
+$script = switch ($Fase) { 'estructura' { 'crear_estructura.py' } 'datos' { 'cargar_datos.py' } 'verificar' { 'verificar_migracion.py' } }
 
 docker build -t mdb-migrator $repo
 if ($LASTEXITCODE -ne 0) { throw 'Falló docker build' }
@@ -31,7 +31,7 @@ try {
 
     $logs = Join-Path $repo 'logs'
     New-Item -ItemType Directory -Force $logs | Out-Null
-    foreach ($l in 'errores_estructura.log', 'errores_carga_datos.log') {
+    foreach ($l in 'errores_estructura.log', 'errores_carga_datos.log', 'rechazados_carga_datos.sql') {
         $destino = Join-Path $logs $l
         if (Test-Path $destino) { Remove-Item $destino -Force }   # evita mostrar el log de una corrida anterior
         docker cp "${name}:/app/$l" $destino 2>$null
