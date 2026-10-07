@@ -28,10 +28,13 @@ BLOQUE = 10000
 def normalizar(valor, tipo="otro"):
     """Forma canónica de una celda (texto CSV de Access o valor crudo de MySQL) para poder compararlas.
 
-    tipo: "bin" (hex), "float"/"double" (se compara a la precisión real del tipo) u "otro" (exacto).
+    tipo: "bin" (hex), "float"/"double" (precisión real del tipo), "date" (columna DATE: la hora de Access debe ser
+    00:00:00, si no se descartó información) u "otro" (exacto).
     """
     if valor is None:
         return ""
+    if tipo == "date" and isinstance(valor, str) and valor.endswith(" 00:00:00"):
+        return valor[:-9]
     if isinstance(valor, (bytes, bytearray)):
         if tipo == "bin":
             return bytes(valor).hex().upper()
@@ -62,6 +65,8 @@ def tipo_columna(data_type):
         return "float"
     if data_type == "double":
         return "double"
+    if data_type == "date":
+        return "date"
     return "otro"
 
 
