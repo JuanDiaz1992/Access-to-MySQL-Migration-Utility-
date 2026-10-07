@@ -33,3 +33,7 @@ errores_carga_datos.log
 # Sistema Operativo
 .DS_Store
 Thumbs.db
+
+# Credenciales y salidas locales
+.env
+logs/

@@ -3,13 +3,11 @@ import sys
 import subprocess
 import re
 import unicodedata
-import mysql.connector
 from rich.console import Console
-from rich.prompt import Prompt
+
+from config import CARPETA_SQL, comando_mysql, conexion_servidor, entorno_mysql, pedir_parametros
 
 console = Console()
-
-CARPETA_SQL = os.path.join(os.path.dirname(__file__), "bases_datos")
 
 def quitar_tildes(texto):
     """Elimina tildes y caracteres especiales respetando Mayúsculas y Minúsculas."""
@@ -20,6 +18,9 @@ def quitar_tildes(texto):
 def normalizar_schema(contenido_sql, prefijo=""):
     """Limpia tildes, desambigua columnas y arregla alter tables / índices duplicados."""
     sql = contenido_sql.replace('\x00', '').replace('\xa0', ' ')
+
+    # Access "Byte" es 0-255 (sin signo); mdb-schema lo emite como tinyint con signo (máx. 127) y rompe los datos
+    sql = re.sub(r'(`\s+)tinyint\b(?!\s*\()', r'\1tinyint unsigned', sql, flags=re.IGNORECASE)
 
     # 1. Eliminar tablas del sistema de Access
     lineas_sql = []
@@ -144,9 +145,7 @@ def normalizar_schema(contenido_sql, prefijo=""):
 def crear_bd_si_no_existe(db_name):
     """Crea la base de datos destino si no existe."""
     try:
-        conn = mysql.connector.connect(
-            host="localhost", user="root", password="", unix_socket="/var/run/mysqld/mysqld.sock"
-        )
+        conn = conexion_servidor()
         cursor = conn.cursor()
         cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;")
         cursor.close()
@@ -182,14 +181,7 @@ def ejecutar_sql_native(db_name, archivo_sql):
     ruta_log = os.path.join(os.path.dirname(__file__), "errores_estructura.log")
     hubo_errores = False
 
-    comando = [
-        "mysql",
-        "-u", "root",
-        "--force",
-        "--socket=/var/run/mysqld/mysqld.sock",
-        "--default-character-set=utf8mb4",
-        db_name
-    ]
+    comando = comando_mysql(db_name)
 
     try:
         with open(archivo_sql, "r", encoding="utf-8", errors="ignore") as f:
@@ -198,7 +190,8 @@ def ejecutar_sql_native(db_name, archivo_sql):
                 stdin=f,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                env=entorno_mysql()
             )
 
         if proceso.stderr:
@@ -228,9 +221,10 @@ def ejecutar_sql_native(db_name, archivo_sql):
 def main():
     console.rule("[bold cyan]Creador de Estructuras DDL (MySQL)[/bold cyan]")
 
-    db_name = Prompt.ask("\n[bold]Nombre de la base de datos destino[/bold]", default="aquamovil_core")
-    archivo = Prompt.ask("[bold]Ingresa el nombre del archivo en bases_datos[/bold] (ej: AQuaBase.mdb)")
-    prefijo = Prompt.ask("[bold]Ingresa el prefijo para las tablas[/bold] (ej: aquabase_ o Enter para ninguno)", default="")
+    db_name, archivo, prefijo = pedir_parametros(
+        "Fase 1: crea la estructura (DDL) en MySQL a partir de un .mdb",
+        "[bold]Ingresa el prefijo para las tablas[/bold] (ej: aquabase_ o Enter para ninguno)",
+    )
 
     if not os.path.dirname(archivo):
         archivo = os.path.join(CARPETA_SQL, archivo)

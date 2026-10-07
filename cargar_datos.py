@@ -4,11 +4,10 @@ import subprocess
 import re
 import unicodedata
 from rich.console import Console
-from rich.prompt import Prompt
+
+from config import CARPETA_SQL, comando_mysql, entorno_mysql, pedir_parametros
 
 console = Console()
-
-CARPETA_SQL = os.path.join(os.path.dirname(__file__), "bases_datos")
 
 def quitar_tildes(texto):
     """Elimina tildes y caracteres especiales respetando Mayúsculas y Minúsculas."""
@@ -36,10 +35,7 @@ def sanitizar_valores_insert(linea_insert):
     return encabezado + valores_corregidos
 
 def sanitizar_linea_insert(line, prefijo=""):
-    """Limpia la sintaxis de INSERT INTO de mdb-export."""
-    if not line.startswith("INSERT INTO"):
-        return quitar_tildes(line)
-
+    """Limpia el encabezado (tabla y columnas) de un INSERT INTO de mdb-export."""
     # 1. Renombrar la tabla con prefijo y sin tildes
     def corregir_tabla(m):
         nombre_tabla_raw = m.group(1)
@@ -85,14 +81,26 @@ def sanitizar_linea_insert(line, prefijo=""):
 
     return line
 
+def sanitizar_sentencia_insert(sentencia, prefijo=""):
+    """Sanea solo el encabezado del INSERT; los valores (con sus tildes y saltos de línea) no se tocan."""
+    pos = sentencia.find(" VALUES")
+    if pos == -1:
+        return sentencia
+    resto = sentencia[pos + len(" VALUES"):]
+    encabezado = sanitizar_linea_insert(sentencia[:pos] + " VALUES", prefijo)
+    return encabezado + sanitizar_valores_insert("VALUES" + resto)[len("VALUES"):]
+
 def normalizar_inserts(contenido_sql, prefijo=""):
-    """Limpia bytes nulos, tildes y arregla las sentencias INSERT."""
+    """Limpia bytes nulos y sanea cada sentencia INSERT completa (mdb-export reparte las filas en varias líneas)."""
     sql_limpio = contenido_sql.replace('\x00', '')
-    lines = []
-    for line in sql_limpio.splitlines():
-        if line.strip():
-            lines.append(sanitizar_linea_insert(line, prefijo))
-    return "\n".join(lines)
+    sentencias = re.split(r'(?m)^(?=INSERT INTO )', sql_limpio)
+    salida = []
+    for s in sentencias:
+        if s.startswith("INSERT INTO "):
+            salida.append(sanitizar_sentencia_insert(s, prefijo))
+        else:
+            salida.append(s)
+    return "".join(salida)
 
 def track_tablas(tablas):
     """Progreso de extracción."""
@@ -111,22 +119,32 @@ def extraer_datos(ruta_mdb, prefijo=""):
         tables = subprocess.check_output(["mdb-tables", "-1", ruta_mdb]).decode("utf-8", errors="ignore").splitlines()
 
         # Desactivamos comprobaciones de sintaxis estricta temporalmente
+        # Con "mdb-export -e" las barras invertidas van escapadas: NO usar NO_BACKSLASH_ESCAPES.
+        # Se conserva el modo estricto del servidor para que los valores fuera de rango fallen en vez de truncarse.
         raw_sql = (
             "SET FOREIGN_KEY_CHECKS=0;\n"
             "SET UNIQUE_CHECKS=0;\n"
-            "SET SQL_MODE='NO_AUTO_VALUE_ON_ZERO,NO_BACKSLASH_ESCAPES';\n\n"
+            "SET SQL_MODE=CONCAT(@@SQL_MODE, ',NO_AUTO_VALUE_ON_ZERO');\n\n"
         )
 
+        tablas_fallidas = []
         for table in track_tablas(tables):
             if table:
-                try:
-                    # mdb-export nativo de MySQL
-                    data = subprocess.check_output(
-                        ["mdb-export", "-I", "mysql", "-D", "%Y-%m-%d %H:%M:%S", ruta_mdb, table]
-                    ).decode("utf-8", errors="ignore")
-                    raw_sql += data + "\n"
-                except Exception:
-                    pass
+                # -b hex: los campos binarios (OLE/imágenes) salen como 0x... válido en MySQL
+                # -e: escapa \ como \\ y los saltos de línea como \n (si no, MySQL se come las barras invertidas)
+                res = subprocess.run(
+                    ["mdb-export", "-I", "mysql", "-b", "hex", "-e", "-D", "%Y-%m-%d %H:%M:%S", ruta_mdb, table],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                if res.returncode != 0:
+                    tablas_fallidas.append(table)
+                    detalle = res.stderr.decode("utf-8", errors="ignore").strip()
+                    console.print(f"[bold red]  ✖ No se pudo exportar la tabla '{table}': {detalle}[/bold red]")
+                    continue
+                raw_sql += res.stdout.decode("utf-8", errors="ignore") + "\n"
+
+        if tablas_fallidas:
+            console.print(f"[bold red]⚠ Tablas NO exportadas ({len(tablas_fallidas)}): {', '.join(tablas_fallidas)}[/bold red]")
 
         raw_sql += "\nSET FOREIGN_KEY_CHECKS=1;\nSET UNIQUE_CHECKS=1;\n"
 
@@ -147,14 +165,7 @@ def cargar_datos_native(db_name, archivo_sql):
 
     ruta_log = os.path.join(os.path.dirname(__file__), "errores_carga_datos.log")
 
-    comando = [
-        "mysql",
-        "-u", "root",
-        "--force",
-        "--socket=/var/run/mysqld/mysqld.sock",
-        "--default-character-set=utf8mb4",
-        db_name
-    ]
+    comando = comando_mysql(db_name)
 
     try:
         with open(archivo_sql, "r", encoding="utf-8", errors="ignore") as f:
@@ -163,7 +174,8 @@ def cargar_datos_native(db_name, archivo_sql):
                 stdin=f,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                env=entorno_mysql()
             )
 
         if proceso.stderr:
@@ -190,9 +202,10 @@ def cargar_datos_native(db_name, archivo_sql):
 def main():
     console.rule("[bold cyan]Cargador de Datos (MySQL)[/bold cyan]")
 
-    db_name = Prompt.ask("\n[bold]Nombre de la base de datos destino[/bold]", default="aquamovil_core")
-    archivo = Prompt.ask("[bold]Ingresa el nombre del archivo en bases_datos[/bold] (ej: AQuaBase.mdb)")
-    prefijo = Prompt.ask("[bold]Ingresa el prefijo correspondiente[/bold] (ej: aquabase_ o Enter para ninguno)", default="")
+    db_name, archivo, prefijo = pedir_parametros(
+        "Fase 2: carga los datos (DML) de un .mdb en tablas MySQL que ya existen",
+        "[bold]Ingresa el prefijo correspondiente[/bold] (ej: aquabase_ o Enter para ninguno)",
+    )
 
     if not os.path.dirname(archivo):
         archivo = os.path.join(CARPETA_SQL, archivo)

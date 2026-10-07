@@ -8,7 +8,37 @@ Especialmente diseñado para lidiar con problemas comunes en migraciones legadas
 - Limpieza y escape seguro de comillas simples (`'`) dentro de datos de texto en bloques `INSERT INTO`.
 - Carga de alto rendimiento directamente por socket/CLI nativo de MySQL evitando cuellos de botella en drivers ORM.
 
-Requisitos Previos
+## Uso en Windows con Docker (recomendado)
+
+El proceso sigue en **dos fases independientes**: `crear_estructura.py` (DDL) y `cargar_datos.py` (DML).
+En producción, donde las tablas ya existen, basta con ejecutar solo la fase de datos.
+
+1. Copia `.env.example` a `.env` y completa `DB_PASSWORD` (el `.env` no se sube a git):
+   `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`.
+2. Ejecuta cada fase con `migrar.ps1` (construye la imagen, **copia** el `.mdb` al contenedor sin modificar
+   el original y alcanza el MySQL de Windows como `host.docker.internal`):
+
+```powershell
+.\migrar.ps1 -Fase estructura -Mdb C:\BasesActivas\GenBase.mdb -BaseDatos aqua_pruebas -Prefijo genbase_
+.\migrar.ps1 -Fase datos      -Mdb C:\BasesActivas\GenBase.mdb -BaseDatos aqua_pruebas -Prefijo genbase_
+.\migrar.ps1 -Fase verificar  -Mdb C:\BasesActivas\GenBase.mdb -BaseDatos aqua_pruebas -Prefijo genbase_
+```
+
+`verificar_conteos.py` compara las filas de cada tabla entre Access y MySQL (cuenta las filas realmente
+exportadas, no `mdb-count`, que puede estar desfasado). Devuelve código de salida 1 si hay diferencias.
+Los scripts aceptan `--db`, `--archivo` y `--prefijo`; lo que falte se pregunta de forma interactiva.
+La conexión se configura con variables de entorno / `.env` (`DB_SOCKET` solo para Linux sin Docker).
+
+Notas aprendidas:
+- El contenedor necesita `LANG=C.UTF-8` (ya está en el `Dockerfile`); sin él `mdb-export` falla en las tablas
+  con tildes en el nombre y esas tablas se omiten.
+- `mdb-export` se llama con `-b hex` (campos binarios/OLE como `0x...`) y `-e` (escapa `\` y saltos de línea).
+  Los valores del INSERT no se modifican: las tildes de los **datos** se conservan; solo se sanean los
+  nombres de tablas y columnas.
+- Access `Byte` (0-255) se crea como `tinyint unsigned` (mdb-schema lo daba con signo, máx. 127).
+- `migrador.py` (todo en uno) es la versión antigua: quita tildes de todo el SQL, incluidos los datos. Usar las dos fases.
+
+Requisitos Previos (ejecución directa en Linux, sin Docker)
 1. Dependencias del Sistema (Linux / Debian / Ubuntu)
 Es necesario contar con los clientes nativos de MySQL y la suite de herramientas CLI mdbtools:
     sudo apt update

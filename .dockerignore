@@ -1,0 +1,11 @@
+.env
+.git
+.gitignore
+bases_datos
+logs
+*.log
+*.sql
+*.mdb
+*.accdb
+venv
+__pycache__
