@@ -29,6 +29,7 @@ DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
 DB_SOCKET = os.environ.get("DB_SOCKET", "")  # Linux: /var/run/mysqld/mysqld.sock
 DB_NAME_DEFAULT = os.environ.get("DB_NAME", "aquamovil_core")
 CARPETA_SQL = os.environ.get("CARPETA_BASES", os.path.join(BASE_DIR, "bases_datos"))
+LOTE_FILAS = int(os.environ.get("LOTE_FILAS", "100"))  # filas por INSERT; si un lote falla se repite fila a fila
 
 
 def conexion_servidor():

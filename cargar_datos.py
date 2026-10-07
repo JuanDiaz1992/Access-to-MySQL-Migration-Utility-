@@ -5,7 +5,7 @@ import re
 import unicodedata
 from rich.console import Console
 
-from config import CARPETA_SQL, comando_mysql, entorno_mysql, pedir_parametros
+from config import CARPETA_SQL, LOTE_FILAS, comando_mysql, entorno_mysql, pedir_parametros
 
 console = Console()
 
@@ -117,8 +117,32 @@ def track_tablas(tablas):
             console.print(f"  └─ Extrayendo datos tabla {i}/{total}: {t.strip()}")
             yield t.strip()
 
+PREAMBULO_SQL = (
+    "SET FOREIGN_KEY_CHECKS=0;\n"
+    "SET UNIQUE_CHECKS=0;\n"
+    f"{SQL_MODE_MIGRACION}\n"
+    "SET autocommit=0;\n\n"
+)
+FORMATO_FECHA = "%Y-%m-%d %H:%M:%S"
+# Errores que afectan a toda la tabla (no a una fila concreta): reintentar fila a fila no sirve
+ERRORES_ESTRUCTURA = {1146, 1054, 1136, 1049}
+
+def exportar_tabla(ruta_mdb, tabla, lote):
+    """mdb-export de una tabla con `lote` filas por INSERT. Devuelve (texto, error)."""
+    # -S: filas por sentencia; cada sentencia sale en UNA línea
+    # -b hex: los campos binarios (OLE/imágenes) salen como 0x... válido en MySQL
+    # -e: escapa \ como \\ y los saltos de línea como \n (si no, MySQL se come las barras invertidas)
+    res = subprocess.run(
+        ["mdb-export", "-I", "mysql", "-S", str(lote), "-b", "hex", "-e", "-D", FORMATO_FECHA, ruta_mdb, tabla],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    if res.returncode != 0:
+        return None, res.stderr.decode("utf-8", errors="ignore").strip()
+    return res.stdout.decode("utf-8", errors="ignore"), None
+
 def extraer_datos(ruta_mdb, prefijo=""):
-    """Extrae las instrucciones INSERT INTO."""
+    """Extrae las instrucciones INSERT INTO. Devuelve (ruta_sql, bloques) donde bloques es
+    [(tabla_access, linea_inicial, num_sentencias)] para poder localizar lotes fallidos."""
     ruta_sql = ruta_mdb.rsplit('.', 1)[0] + '_datos.sql'
     console.print(f"[bold yellow]Extrayendo únicamente DATOS (INSERT INTO)...[/bold yellow]")
 
@@ -129,37 +153,34 @@ def extraer_datos(ruta_mdb, prefijo=""):
         # Se conserva el modo estricto (los valores fuera de rango fallan en vez de truncarse), pero se permiten
         # fechas con día/mes cero: Access las guarda (p. ej. 1900-01-00) y el modo estricto rechazaría la fila.
         tablas_fallidas = []
+        bloques = []
         # Cada tabla se sanea y se escribe a disco al terminar: no se acumula todo el SQL en memoria (bases de cientos de MB).
         with open(ruta_sql, "w", encoding="utf-8") as salida:
-            salida.write(
-                "SET FOREIGN_KEY_CHECKS=0;\n"
-                "SET UNIQUE_CHECKS=0;\n"
-                f"{SQL_MODE_MIGRACION}\n"
-                "SET autocommit=0;\n\n"
-            )
+            salida.write(PREAMBULO_SQL)
+            lineas_escritas = PREAMBULO_SQL.count("\n")
 
             for table in track_tablas(tables):
-                # -S 1: una fila por sentencia, así un valor inválido solo afecta a su fila y no a todo un lote
-                # -b hex: los campos binarios (OLE/imágenes) salen como 0x... válido en MySQL
-                # -e: escapa \ como \\ y los saltos de línea como \n (si no, MySQL se come las barras invertidas)
-                res = subprocess.run(
-                    ["mdb-export", "-I", "mysql", "-S", "1", "-b", "hex", "-e", "-D", "%Y-%m-%d %H:%M:%S", ruta_mdb, table],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
-                if res.returncode != 0:
+                datos, error = exportar_tabla(ruta_mdb, table, LOTE_FILAS)
+                if error is not None:
                     tablas_fallidas.append(table)
-                    detalle = res.stderr.decode("utf-8", errors="ignore").strip()
-                    console.print(f"[bold red]  ✖ No se pudo exportar la tabla '{table}': {detalle}[/bold red]")
+                    console.print(f"[bold red]  ✖ No se pudo exportar la tabla '{table}': {error}[/bold red]")
                     continue
-                datos = res.stdout.decode("utf-8", errors="ignore")
-                salida.write(normalizar_inserts(datos, prefijo) + "\nCOMMIT;\n")
+                texto = normalizar_inserts(datos, prefijo)
+                if not texto.strip():
+                    continue
+                if not texto.endswith("\n"):
+                    texto += "\n"
+                n = texto.count("\n")
+                bloques.append((table, lineas_escritas + 1, n))
+                salida.write(texto + "COMMIT;\n")
+                lineas_escritas += n + 1
 
             salida.write("\nSET FOREIGN_KEY_CHECKS=1;\nSET UNIQUE_CHECKS=1;\n")
 
         if tablas_fallidas:
             console.print(f"[bold red]⚠ Tablas NO exportadas ({len(tablas_fallidas)}): {', '.join(tablas_fallidas)}[/bold red]")
 
-        return ruta_sql
+        return ruta_sql, bloques
     except FileNotFoundError:
         console.print("[bold red]Error:[bold red] 'mdbtools' no está instalado. Ejecuta: sudo apt install mdbtools")
         sys.exit(1)
@@ -168,7 +189,7 @@ PATRON_ERROR = re.compile(r"^ERROR (\d+) \(([^)]*)\) at line (\d+): (.*)$")
 MAX_RECHAZADOS = 10000
 
 def resumir_errores(ruta_log):
-    """Lee el log por streaming: total de errores, los primeros 5 y {linea_del_sql: mensaje}."""
+    """Lee el log por streaming: total de errores, los primeros 5 y {linea_del_sql: (codigo, mensaje)}."""
     total, primeros, por_linea = 0, [], {}
     with open(ruta_log, "r", encoding="utf-8", errors="ignore") as f:
         for linea in f:
@@ -180,7 +201,7 @@ def resumir_errores(ruta_log):
                 primeros.append(linea)
             m = PATRON_ERROR.match(linea)
             if m and len(por_linea) < MAX_RECHAZADOS:
-                por_linea[int(m.group(3))] = m.group(4)
+                por_linea[int(m.group(3))] = (int(m.group(1)), m.group(4))
     return total, primeros, por_linea
 
 def guardar_rechazados(archivo_sql, por_linea, ruta_destino):
@@ -190,59 +211,115 @@ def guardar_rechazados(archivo_sql, por_linea, ruta_destino):
          open(ruta_destino, "w", encoding="utf-8") as dst:
         for n, linea in enumerate(src, 1):
             if n in pendientes:
-                dst.write(f"-- {por_linea[n]}\n{linea.rstrip()}\n")
+                dst.write(f"-- {por_linea[n][1]}\n{linea.rstrip()}\n")
                 pendientes.discard(n)
                 if not pendientes:
                     break
 
-def cargar_datos_native(db_name, archivo_sql):
-    """Inserta los registros en las tablas existentes. Devuelve True si hubo errores."""
-    console.print(f"\n[bold blue]Insertando registros en MySQL...[/bold blue]")
+def ejecutar_mysql(db_name, archivo_sql, ruta_log):
+    """Ejecuta un .sql con el cliente mysql (stderr directo a disco)."""
+    with open(archivo_sql, "r", encoding="utf-8", errors="ignore") as f, \
+         open(ruta_log, "w", encoding="utf-8") as log_file:
+        subprocess.run(
+            comando_mysql(db_name),
+            stdin=f,
+            stdout=subprocess.DEVNULL,
+            stderr=log_file,
+            text=True,
+            env=entorno_mysql()
+        )
+
+def preparar_reintento(ruta_mdb, prefijo, bloques, lineas_falladas, ruta_reintento):
+    """Escribe un .sql con las filas de los lotes fallidos, una por sentencia. MySQL deshace por completo
+    una sentencia fallida, así que reintentar esas filas no duplica nada. Devuelve el número de filas."""
+    por_tabla = {}
+    for n in sorted(lineas_falladas):
+        for tabla, inicio, cantidad in bloques:
+            if inicio <= n < inicio + cantidad:
+                por_tabla.setdefault(tabla, []).append(n - inicio)
+                break
+
+    filas = 0
+    with open(ruta_reintento, "w", encoding="utf-8") as salida:
+        salida.write(PREAMBULO_SQL)
+        for tabla, ordinales in por_tabla.items():
+            datos, error = exportar_tabla(ruta_mdb, tabla, 1)
+            if error is not None:
+                console.print(f"[bold red]  ✖ No se pudo re-exportar '{tabla}' para el reintento: {error}[/bold red]")
+                continue
+            sentencias = datos.split("\n")
+            for k in ordinales:
+                for sentencia in sentencias[k * LOTE_FILAS:(k + 1) * LOTE_FILAS]:
+                    if sentencia.strip():
+                        salida.write(normalizar_inserts(sentencia, prefijo).strip() + "\n")
+                        filas += 1
+            salida.write("COMMIT;\n")
+        salida.write("\nSET FOREIGN_KEY_CHECKS=1;\nSET UNIQUE_CHECKS=1;\n")
+    return filas
+
+def cargar_datos_native(db_name, archivo_sql, ruta_mdb, prefijo, bloques):
+    """Inserta los registros en las tablas existentes (lotes de LOTE_FILAS filas; los lotes que MySQL rechaza se
+    repiten fila a fila). Devuelve True si quedaron errores."""
+    console.print(f"\n[bold blue]Insertando registros en MySQL (lotes de {LOTE_FILAS} filas)...[/bold blue]")
 
     carpeta = os.path.dirname(os.path.abspath(__file__))
     ruta_log = os.path.join(carpeta, "errores_carga_datos.log")
     ruta_rechazados = os.path.join(carpeta, "rechazados_carga_datos.sql")
+    ruta_reintento = archivo_sql.rsplit('.', 1)[0] + '_reintento.sql'
+    ruta_log_reintento = os.path.join(carpeta, "errores_reintento.tmp")
     hubo_errores = False
 
-    comando = comando_mysql(db_name)
-
     try:
-        # stderr va directo a disco: un error repetido en millones de filas no debe llenar la memoria
-        with open(archivo_sql, "r", encoding="utf-8", errors="ignore") as f, \
-             open(ruta_log, "w", encoding="utf-8") as log_file:
-            subprocess.run(
-                comando,
-                stdin=f,
-                stdout=subprocess.DEVNULL,
-                stderr=log_file,
-                text=True,
-                env=entorno_mysql()
-            )
-
+        ejecutar_mysql(db_name, archivo_sql, ruta_log)
         total, primeros, por_linea = resumir_errores(ruta_log)
+
         if total == 0:
             os.remove(ruta_log)
             console.print("\n[bold green]✔ ¡Carga de datos completada con éxito![/bold green]\n")
-        else:
+            return False
+
+        # Errores de estructura (tabla/columna inexistente...): afectan a todo y reintentar no sirve
+        estructura = {n: v for n, v in por_linea.items() if v[0] in ERRORES_ESTRUCTURA}
+        reintentables = {n: v for n, v in por_linea.items() if v[0] not in ERRORES_ESTRUCTURA}
+        console.print(f"\n[bold yellow]⚠ {total} lotes fueron rechazados por MySQL en el primer intento.[/bold yellow]")
+        if estructura:
             hubo_errores = True
-            guardar_rechazados(archivo_sql, por_linea, ruta_rechazados)
-            console.print(f"\n[bold yellow]⚠ La carga terminó con {total} errores en registros específicos.[/bold yellow]")
-            console.print(f"Detalle de los errores: [bold cyan]{ruta_log}[/bold cyan]")
-            console.print(f"Filas rechazadas (para revisarlas o recargarlas): [bold cyan]{ruta_rechazados}[/bold cyan]")
-            if total > MAX_RECHAZADOS:
-                console.print(f"[bold yellow]Solo se guardaron las primeras {MAX_RECHAZADOS} filas rechazadas.[/bold yellow]")
-            console.print("[bold red]Primeros errores encontrados:[/bold red]")
+            console.print("[bold red]Hay errores de estructura (¿falta crear tablas o columnas con la fase 1?):[/bold red]")
             for err in primeros:
                 console.print(f" • {err}")
 
+        rechazadas = {}
+        if reintentables:
+            filas = preparar_reintento(ruta_mdb, prefijo, bloques, reintentables, ruta_reintento)
+            console.print(f"Reintentando fila a fila {filas} filas de {len(reintentables)} lotes...")
+            ejecutar_mysql(db_name, ruta_reintento, ruta_log_reintento)
+            total2, primeros2, rechazadas = resumir_errores(ruta_log_reintento)
+            with open(ruta_log, "a", encoding="utf-8") as log_file, \
+                 open(ruta_log_reintento, "r", encoding="utf-8", errors="ignore") as log_reintento:
+                log_file.write("\n-- Reintento fila a fila --\n")
+                log_file.write(log_reintento.read())
+            if rechazadas:
+                hubo_errores = True
+                guardar_rechazados(ruta_reintento, rechazadas, ruta_rechazados)
+                console.print(f"[bold red]✖ {total2} filas rechazadas definitivamente[/bold red] (de {filas} reintentadas; "
+                              f"las otras {filas - total2} se cargaron).")
+                console.print(f"Filas rechazadas: [bold cyan]{ruta_rechazados}[/bold cyan]")
+                for err in primeros2:
+                    console.print(f" • {err}")
+            else:
+                console.print(f"[bold green]✔ Las {filas} filas se cargaron al reintentarlas una por una.[/bold green]")
+
+        console.print(f"Detalle de los errores: [bold cyan]{ruta_log}[/bold cyan]\n")
+        return hubo_errores
+
     except Exception as e:
-        hubo_errores = True
         console.print(f"[bold red]Error ejecutando el cliente nativo de MySQL:[/bold red] {e}")
+        return True
     finally:
-        if os.path.exists(archivo_sql):
-            os.remove(archivo_sql)
-            console.print(f"[bold dim]🗑 Archivo temporal borrado: {os.path.basename(archivo_sql)}[/bold dim]\n")
-    return hubo_errores
+        for ruta in (archivo_sql, ruta_reintento, ruta_log_reintento):
+            if os.path.exists(ruta):
+                os.remove(ruta)
+        console.print(f"[bold dim]🗑 Archivos temporales borrados[/bold dim]\n")
 
 def main():
     console.rule("[bold cyan]Cargador de Datos (MySQL)[/bold cyan]")
@@ -263,8 +340,8 @@ def main():
             console.print(f"[bold red]Error:[bold red] El archivo '{archivo}' no existe.")
             return
 
-    archivo_sql = extraer_datos(archivo, prefijo)
-    if cargar_datos_native(db_name, archivo_sql):
+    archivo_sql, bloques = extraer_datos(archivo, prefijo)
+    if cargar_datos_native(db_name, archivo_sql, archivo, prefijo, bloques):
         sys.exit(1)
 
 if __name__ == "__main__":

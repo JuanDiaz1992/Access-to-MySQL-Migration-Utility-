@@ -40,10 +40,12 @@ Notas aprendidas:
   apuntaban a tablas inexistentes y las inserciones normales en esas tablas fallaban.
 - Una columna `unique` ya crea en MySQL un índice con el nombre de la columna: un `ADD INDEX` con ese nombre
   recibe sufijo `_2` en vez de fallar con `ERROR 1061`.
-- Una fila por sentencia `INSERT` (`mdb-export -S 1`) con `autocommit=0` y `COMMIT` por tabla: un valor inválido
-  solo afecta a su propia fila (antes tumbaba un lote de cientos). Las filas que MySQL rechace se guardan,
-  con su mensaje de error, en `rechazados_carga_datos.sql` y el detalle en `errores_carga_datos.log`
-  (`cargar_datos.py` termina con código 1 si hubo rechazos).
+- Carga en lotes de `LOTE_FILAS` filas por `INSERT` (100 por defecto, `mdb-export -S`) con `autocommit=0` y `COMMIT`
+  por tabla. Si MySQL rechaza un lote (deshace la sentencia completa, sin dejar filas a medias), esas filas se
+  repiten una por una: solo se rechazan las filas realmente inválidas, que quedan con su motivo en
+  `rechazados_carga_datos.sql` (detalle en `errores_carga_datos.log`). Los errores de estructura (tabla o columna
+  inexistente) se avisan sin reintentar. `cargar_datos.py` termina con código 1 si quedó algún error.
+  Referencia medida con `AQuaBase` (2.5 M de filas): carga ~4 min y verificación ~5 min.
 - La carga usa el modo SQL estricto del servidor **sin** `NO_ZERO_IN_DATE`/`NO_ZERO_DATE`: Access permite fechas
   como `1900-01-00` y MySQL las rechazaba. Se guardan tal cual, sin alterar el dato.
 - Los datos se escriben a disco tabla por tabla (no se acumula todo el SQL en memoria), necesario para `.mdb`
