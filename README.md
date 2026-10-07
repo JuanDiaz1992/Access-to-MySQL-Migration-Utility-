@@ -18,6 +18,12 @@ En producción, donde las tablas ya existen, basta con ejecutar solo la fase de 
 2. Ejecuta cada fase con `migrar.ps1` (construye la imagen, **copia** el `.mdb` al contenedor sin modificar
    el original y alcanza el MySQL de Windows como `host.docker.internal`):
 
+**Modo interactivo (recomendado):** ejecuta `.\migrar.ps1` sin parametros. Pregunta una a una la fase (con un menu),
+el archivo `.mdb` (lista numerada de `C:\BasesActivas` o una ruta), la base MySQL de destino y el prefijo, muestra un
+resumen y pide confirmacion antes de hacer nada. No hay valores por defecto para la base ni para el prefijo.
+
+**Modo directo** (los cuatro datos juntos, sin preguntas):
+
 ```powershell
 .\migrar.ps1 -Fase estructura -Mdb C:\BasesActivas\GenBase.mdb -BaseDatos aqua_pruebas -Prefijo genbase_
 .\migrar.ps1 -Fase datos      -Mdb C:\BasesActivas\GenBase.mdb -BaseDatos aqua_pruebas -Prefijo genbase_
