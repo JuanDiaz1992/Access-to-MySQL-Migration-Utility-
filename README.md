@@ -15,19 +15,26 @@ En producción, donde las tablas ya existen, basta con ejecutar solo la fase de 
 
 1. Copia `.env.example` a `.env` y completa `DB_PASSWORD` (el `.env` no se sube a git):
    `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`.
-2. Ejecuta cada fase con `migrar.ps1` (construye la imagen, **copia** el `.mdb` al contenedor sin modificar
-   el original y alcanza el MySQL de Windows como `host.docker.internal`):
+2. Ejecuta `migrar.ps1` (construye la imagen de Docker, **copia** los `.mdb` al contenedor sin modificar los
+   originales y alcanza el MySQL de Windows como `host.docker.internal`). Migra **una base o varias**.
 
-**Modo interactivo (recomendado):** ejecuta `.\migrar.ps1` sin parametros. Pregunta una a una la fase (con un menu),
-el archivo `.mdb` (lista numerada de `C:\BasesActivas` o una ruta), la base MySQL de destino y el prefijo, muestra un
-resumen y pide confirmacion antes de hacer nada. No hay valores por defecto para la base ni para el prefijo.
+**Modo interactivo (recomendado):** ejecuta `.\migrar.ps1` sin parametros. Pregunta, con las opciones visibles:
+la fase (`estructura`, `datos`, `verificar` o `todo` = las tres en orden), las bases de Access (lista numerada de
+`C:\BasesActivas`: un numero, varias con `1,3,5` o `1-4`, `T` para todas, o la ruta de otro `.mdb`), la base MySQL
+de destino y el prefijo (con varias bases es automatico: nombre del archivo en minusculas + `_`). Antes de ejecutar
+consulta el destino, muestra un resumen y pide confirmacion. No hay valores por defecto para la base ni el prefijo.
 
-**Modo directo** (los cuatro datos juntos, sin preguntas):
+**Nunca duplica:** omite (y lo avisa) las bases cuyas tablas ya existen (`estructura`, `todo`) o ya tienen datos
+(`datos`), y `datos` se niega si faltan las tablas. `-Forzar` desactiva estas protecciones. Al terminar muestra una
+tabla con OK/FALLO por base y fase; el detalle de errores queda en `logs\<base>\`.
+
+**Modo directo** (sin preguntas):
 
 ```powershell
-.\migrar.ps1 -Fase estructura -Mdb C:\BasesActivas\GenBase.mdb -BaseDatos aqua_pruebas -Prefijo genbase_
-.\migrar.ps1 -Fase datos      -Mdb C:\BasesActivas\GenBase.mdb -BaseDatos aqua_pruebas -Prefijo genbase_
-.\migrar.ps1 -Fase verificar  -Mdb C:\BasesActivas\GenBase.mdb -BaseDatos aqua_pruebas -Prefijo genbase_
+.\migrar.ps1 -Fase todo       -Mdb C:\BasesActivas\GenBase.mdb -BaseDatos mi_base -Prefijo genbase_
+.\migrar.ps1 -Fase estructura -Mdb C:\BasesActivas\GenBase.mdb,C:\BasesActivas\PtoBase.mdb -BaseDatos mi_base
+.\migrar.ps1 -Fase datos      -Todas -BaseDatos mi_base
+.\migrar.ps1 -Fase verificar  -Mdb C:\BasesActivas\GenBase.mdb -BaseDatos mi_base -Prefijo genbase_
 ```
 
 `verificar_migracion.py` compara cada tabla entre Access y MySQL **fila por fila y celda por celda** (no solo

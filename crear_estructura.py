@@ -277,6 +277,7 @@ def ejecutar_sql_native(db_name, archivo_sql):
                 console.print(f"[bold dim]🗑 Archivo temporal borrado: {os.path.basename(archivo_sql)}[/bold dim]\n")
             else:
                 console.print(f"[bold yellow]📄 Archivo SQL conservado para inspección: {os.path.basename(archivo_sql)}[/bold yellow]\n")
+    return hubo_errores
 
 def main():
     console.rule("[bold cyan]Creador de Estructuras DDL (MySQL)[/bold cyan]")
@@ -299,7 +300,8 @@ def main():
 
     crear_bd_si_no_existe(db_name)
     archivo_sql = extraer_estructura(archivo, prefijo)
-    ejecutar_sql_native(db_name, archivo_sql)
+    if ejecutar_sql_native(db_name, archivo_sql):
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
