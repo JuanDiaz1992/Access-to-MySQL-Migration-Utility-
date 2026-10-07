@@ -32,7 +32,9 @@ try {
     $logs = Join-Path $repo 'logs'
     New-Item -ItemType Directory -Force $logs | Out-Null
     foreach ($l in 'errores_estructura.log', 'errores_carga_datos.log') {
-        docker cp "${name}:/app/$l" (Join-Path $logs $l) 2>$null
+        $destino = Join-Path $logs $l
+        if (Test-Path $destino) { Remove-Item $destino -Force }   # evita mostrar el log de una corrida anterior
+        docker cp "${name}:/app/$l" $destino 2>$null
     }
 }
 finally {
