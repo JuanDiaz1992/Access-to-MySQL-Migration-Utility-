@@ -35,6 +35,12 @@ Notas aprendidas:
 - `mdb-export` se llama con `-b hex` (campos binarios/OLE como `0x...`) y `-e` (escapa `\` y saltos de línea).
   Los valores del INSERT no se modifican: las tildes de los **datos** se conservan; solo se sanean los
   nombres de tablas y columnas.
+- Claves foráneas: la tabla referenciada (`REFERENCES`) y el nombre de la restricción llevan el prefijo; antes
+  apuntaban a tablas inexistentes y las inserciones normales en esas tablas fallaban.
+- Una columna `unique` ya crea en MySQL un índice con el nombre de la columna: un `ADD INDEX` con ese nombre
+  recibe sufijo `_2` en vez de fallar con `ERROR 1061`.
+- Los datos se escriben a disco tabla por tabla (no se acumula todo el SQL en memoria), necesario para `.mdb`
+  de cientos de MB; el cliente `mysql` usa `--max-allowed-packet=64M`.
 - Access `Byte` (0-255) se crea como `tinyint unsigned` (mdb-schema lo daba con signo, máx. 127).
 - `migrador.py` (todo en uno) es la versión antigua: quita tildes de todo el SQL, incluidos los datos. Usar las dos fases.
 

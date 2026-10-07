@@ -45,7 +45,7 @@ def conexion_servidor():
 
 def comando_mysql(db_name):
     """Comando del cliente nativo `mysql` (la contraseña va por MYSQL_PWD, no por argumentos)."""
-    cmd = ["mysql", "-u", DB_USER, "--force", "--default-character-set=utf8mb4"]
+    cmd = ["mysql", "-u", DB_USER, "--force", "--default-character-set=utf8mb4", "--max-allowed-packet=64M"]
     if DB_SOCKET:
         cmd.append(f"--socket={DB_SOCKET}")
     else:

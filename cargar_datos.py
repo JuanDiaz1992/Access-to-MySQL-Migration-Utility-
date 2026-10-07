@@ -118,18 +118,18 @@ def extraer_datos(ruta_mdb, prefijo=""):
     try:
         tables = subprocess.check_output(["mdb-tables", "-1", ruta_mdb]).decode("utf-8", errors="ignore").splitlines()
 
-        # Desactivamos comprobaciones de sintaxis estricta temporalmente
         # Con "mdb-export -e" las barras invertidas van escapadas: NO usar NO_BACKSLASH_ESCAPES.
         # Se conserva el modo estricto del servidor para que los valores fuera de rango fallen en vez de truncarse.
-        raw_sql = (
-            "SET FOREIGN_KEY_CHECKS=0;\n"
-            "SET UNIQUE_CHECKS=0;\n"
-            "SET SQL_MODE=CONCAT(@@SQL_MODE, ',NO_AUTO_VALUE_ON_ZERO');\n\n"
-        )
-
         tablas_fallidas = []
-        for table in track_tablas(tables):
-            if table:
+        # Cada tabla se sanea y se escribe a disco al terminar: no se acumula todo el SQL en memoria (bases de cientos de MB).
+        with open(ruta_sql, "w", encoding="utf-8") as salida:
+            salida.write(
+                "SET FOREIGN_KEY_CHECKS=0;\n"
+                "SET UNIQUE_CHECKS=0;\n"
+                "SET SQL_MODE=CONCAT(@@SQL_MODE, ',NO_AUTO_VALUE_ON_ZERO');\n\n"
+            )
+
+            for table in track_tablas(tables):
                 # -b hex: los campos binarios (OLE/imágenes) salen como 0x... válido en MySQL
                 # -e: escapa \ como \\ y los saltos de línea como \n (si no, MySQL se come las barras invertidas)
                 res = subprocess.run(
@@ -141,18 +141,13 @@ def extraer_datos(ruta_mdb, prefijo=""):
                     detalle = res.stderr.decode("utf-8", errors="ignore").strip()
                     console.print(f"[bold red]  ✖ No se pudo exportar la tabla '{table}': {detalle}[/bold red]")
                     continue
-                raw_sql += res.stdout.decode("utf-8", errors="ignore") + "\n"
+                datos = res.stdout.decode("utf-8", errors="ignore")
+                salida.write(normalizar_inserts(datos, prefijo) + "\n")
+
+            salida.write("\nSET FOREIGN_KEY_CHECKS=1;\nSET UNIQUE_CHECKS=1;\n")
 
         if tablas_fallidas:
             console.print(f"[bold red]⚠ Tablas NO exportadas ({len(tablas_fallidas)}): {', '.join(tablas_fallidas)}[/bold red]")
-
-        raw_sql += "\nSET FOREIGN_KEY_CHECKS=1;\nSET UNIQUE_CHECKS=1;\n"
-
-        console.print("[bold yellow]Sanitizando datos, tildes y prefijos...[/bold yellow]")
-        sql_procesado = normalizar_inserts(raw_sql, prefijo)
-
-        with open(ruta_sql, "w", encoding="utf-8") as f:
-            f.write(sql_procesado)
 
         return ruta_sql
     except FileNotFoundError:

@@ -44,10 +44,13 @@ def normalizar_schema(contenido_sql, prefijo=""):
     )
 
     # 3. Procesar las columnas duplicadas en el cuerpo de cada CREATE TABLE
+    claves_unicas = {}  # tabla (minúsculas) -> columnas "unique": MySQL ya crea un índice con ese nombre
+
     def procesar_cuerpo_tabla(match):
         encabezado = match.group(1)
         cuerpo = match.group(2)
         cierre = match.group(3)
+        tabla_key = re.search(r'`([^`]+)`', encabezado).group(1).lower()
 
         lineas = cuerpo.splitlines()
         columnas_vistas_lower = set()
@@ -71,6 +74,8 @@ def normalizar_schema(contenido_sql, prefijo=""):
                     col_final = col_sin_tildes
 
                 columnas_vistas_lower.add(col_final.lower())
+                if re.search(r'\bunique\b', sufijo_col, re.IGNORECASE):
+                    claves_unicas.setdefault(tabla_key, set()).add(col_final.lower())
                 linea = f"{prefijo_col}{col_final}{sufijo_col}"
             else:
                 linea = quitar_tildes(linea)
@@ -108,7 +113,7 @@ def normalizar_schema(contenido_sql, prefijo=""):
 
             tabla_final = f"{prefijo}{tabla_raw}"
             if tabla_final not in indices_por_tabla:
-                indices_por_tabla[tabla_final] = set()
+                indices_por_tabla[tabla_final] = set(claves_unicas.get(tabla_final.lower(), ()))
 
             idx_set = indices_por_tabla[tabla_final]
             idx_lower = nombre_idx.lower()
@@ -134,6 +139,20 @@ def normalizar_schema(contenido_sql, prefijo=""):
             linea_clean = re.sub(
                 r'ALTER\s+TABLE\s+[`"]?([^`"\s]+)[`"]?',
                 lambda m: f"ALTER TABLE `{prefijo}{m.group(1)}`",
+                linea_clean,
+                flags=re.IGNORECASE
+            )
+            # Claves foráneas: la tabla referenciada también lleva prefijo (si no, apunta a una tabla inexistente)
+            # y el nombre de la restricción debe ser único en toda la base de datos.
+            linea_clean = re.sub(
+                r'(REFERENCES\s+[`"]?)([^`"\s(]+)',
+                lambda m: f"{m.group(1)}{prefijo}{m.group(2)}",
+                linea_clean,
+                flags=re.IGNORECASE
+            )
+            linea_clean = re.sub(
+                r'(ADD\s+CONSTRAINT\s+[`"]?)([^`"\s]+)',
+                lambda m: f"{m.group(1)}{prefijo}{m.group(2)}",
                 linea_clean,
                 flags=re.IGNORECASE
             )
