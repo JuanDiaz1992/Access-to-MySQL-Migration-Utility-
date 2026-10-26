@@ -68,6 +68,19 @@ Notas aprendidas:
   (`TEXT` se limita a 64 KB). `verificar_migracion.py` audita estos tipos también en estructuras ya creadas con
   versiones anteriores de la herramienta: si aparecen columnas `FLOAT` donde Access tenía `Double`, hay que
   corregirlas (`ALTER TABLE ... MODIFY ... DOUBLE`) antes de cargar datos.
+- **Decimales exactos (Single y Double):** `mdb-export` escribe los `Single` con 8 cifras (`%.8g`) y los `Double` con 16
+  (`%.16lg`), y con eso algunos valores no vuelven a ser el mismo número binario: el Double `2315.2199999999998` de
+  Access llegaba a MySQL como `2315.22` (2.913 celdas de `Tarifas` en la base de pruebas). El `Dockerfile` compila
+  mdbtools 1.0.0 (la versión de Ubuntu 24.04) con 9 y 17 cifras, que identifican de forma única el valor de 32 y 64
+  bits: el `FLOAT` y el `DOUBLE` de MySQL quedan idénticos bit a bit a Access. La construcción falla si el código de
+  mdbtools ya no tiene el formato esperado (no se parchea a ciegas).
+- **Cuidado al copiar o respaldar bases con columnas `FLOAT`:** `mysqldump` (y cualquier `SELECT` que pase por el cliente)
+  entrega los `FLOAT` con solo 6 cifras (`186424.34` sale como `186424`). Una copia hecha con dump/restore pierde
+  precisión aunque la base original esté exacta. Para copiar entre bases del mismo servidor usar
+  `INSERT INTO destino SELECT * FROM origen`; para leerlos desde un programa, `CAST(columna AS DOUBLE)`.
+- `verificar_migracion.py` compara los `float` y `double` **sin redondear** (el valor completo de 32 y 64 bits; las
+  columnas `FLOAT` de MySQL se piden como `CAST(... AS DOUBLE)`). Antes los comparaba a 6 y 15 cifras, igual que la
+  exportación, así que no podía ver estas diferencias.
 - Access `Byte` (0-255) se crea como `tinyint unsigned` (mdb-schema lo daba con signo, máx. 127).
 - `migrador.py` (todo en uno) es la versión antigua: quita tildes de todo el SQL, incluidos los datos. Usar las dos fases.
 

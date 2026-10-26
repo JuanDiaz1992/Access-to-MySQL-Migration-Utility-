@@ -28,8 +28,11 @@ BLOQUE = 10000
 def normalizar(valor, tipo="otro"):
     """Forma canónica de una celda (texto CSV de Access o valor crudo de MySQL) para poder compararlas.
 
-    tipo: "bin" (hex), "float"/"double" (precisión real del tipo), "date" (columna DATE: la hora de Access debe ser
-    00:00:00, si no se descartó información) u "otro" (exacto).
+    tipo: "bin" (hex), "float" (Single: se compara el valor de 32 bits completo), "double" (se compara el valor de
+    64 bits completo), "date" (columna DATE: la hora de Access debe ser 00:00:00, si no se descartó información) u
+    "otro" (exacto). Los float y double se comparan SIN redondear: dos valores distintos en el último bit son una
+    diferencia (por eso las columnas FLOAT de MySQL se piden como CAST(... AS DOUBLE): el cliente de MySQL las entrega
+    con solo 6 cifras).
     """
     if valor is None:
         return ""
@@ -45,13 +48,14 @@ def normalizar(valor, tipo="otro"):
     if NUMERO.match(valor):
         try:
             if tipo == "float":
-                # Single de Access = 32 bits: se redondea a float32 antes de comparar (MySQL lo muestra con 6 dígitos)
-                texto = format(struct.unpack("f", struct.pack("f", float(valor)))[0], ".6g")
+                # Single de Access = 32 bits: se lleva a float32 y se compara su valor exacto (repr es de ida y vuelta)
+                texto = repr(struct.unpack("f", struct.pack("f", float(valor)))[0])
             elif tipo == "double":
-                texto = format(float(valor), ".15g")
+                texto = repr(float(valor))
             else:
                 texto = format(Decimal(valor).normalize(), "f")
-            return "0" if texto in ("-0", "-0.0") else texto
+            # 0, -0 y 0.0 son el mismo valor (los separa solo la forma de escribirlo)
+            return "0" if texto in ("-0", "-0.0") or (tipo in ("float", "double") and float(texto) == 0) else texto
         except (ValueError, InvalidOperation, OverflowError):
             return valor
     return valor
@@ -91,9 +95,11 @@ def filas_access(ruta_mdb, tabla, tipos):
         raise RuntimeError(proceso.stderr.read().decode("utf-8", errors="ignore").strip())
 
 
-def filas_mysql(conn, db_name, tabla_real, tipos):
+def filas_mysql(conn, db_name, tabla_real, tipos, columnas):
     cursor = conn.cursor(raw=True)
-    cursor.execute(f"SELECT * FROM `{db_name}`.`{tabla_real}`")
+    # Las columnas FLOAT se piden como DOUBLE: el cliente las entrega con 6 cifras y ocultaría la diferencia real
+    seleccion = ", ".join(f"CAST(`{c}` AS DOUBLE)" if t == "float" else f"`{c}`" for c, t in zip(columnas, tipos))
+    cursor.execute(f"SELECT {seleccion} FROM `{db_name}`.`{tabla_real}`")
     while True:
         bloque = cursor.fetchmany(BLOQUE)
         if not bloque:
@@ -103,7 +109,7 @@ def filas_mysql(conn, db_name, tabla_real, tipos):
     cursor.close()
 
 
-def comparar_tabla(conn, db_name, ruta_mdb, tabla, tabla_real, tipos):
+def comparar_tabla(conn, db_name, ruta_mdb, tabla, tabla_real, tipos, columnas):
     """Devuelve (filas_access, filas_mysql, faltan_en_mysql, sobran_en_mysql, ejemplos)."""
     en_access = Counter()
     n_access = 0
@@ -113,7 +119,7 @@ def comparar_tabla(conn, db_name, ruta_mdb, tabla, tabla_real, tipos):
 
     en_mysql = Counter()
     n_mysql = 0
-    for fila in filas_mysql(conn, db_name, tabla_real, tipos):
+    for fila in filas_mysql(conn, db_name, tabla_real, tipos, columnas):
         en_mysql[huella(fila)] += 1
         n_mysql += 1
 
@@ -202,12 +208,14 @@ def main():
             continue
 
         cursor.execute(
-            "SELECT data_type FROM information_schema.columns "
+            "SELECT data_type, column_name FROM information_schema.columns "
             "WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position", (db_name, real))
-        tipos = [tipo_columna(t) for (t,) in cursor.fetchall()]
+        definicion = cursor.fetchall()
+        tipos = [tipo_columna(t) for (t, _) in definicion]
+        columnas = [c for (_, c) in definicion]
 
         try:
-            n_a, n_m, faltan, sobran, ejemplos = comparar_tabla(conn, db_name, archivo, tabla, real, tipos)
+            n_a, n_m, faltan, sobran, ejemplos = comparar_tabla(conn, db_name, archivo, tabla, real, tipos, columnas)
         except Exception as e:
             problemas.append((tabla, "?", "?", f"Error al comparar: {e}", []))
             console.print(f"  [{i}/{len(tablas)}] {tabla}: [red]ERROR {e}[/red]")
